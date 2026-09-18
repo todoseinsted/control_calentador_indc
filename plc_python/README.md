@@ -34,14 +34,14 @@ Las dependencias ya estaban instaladas en el PLC inspeccionado. Para una sola
 lectura:
 
 ```bash
-cd /home/RaspPLC1/Ensayos
+cd /home/RaspPLC1/Ensayos/calentador_plc
 python3 control_calentador_plc.py --once
 ```
 
 Para levantar la pagina web:
 
 ```bash
-cd /home/RaspPLC1/Ensayos
+cd /home/RaspPLC1/Ensayos/calentador_plc
 python3 control_calentador_plc.py
 ```
 
