@@ -220,12 +220,12 @@ PAGE = """<!doctype html>
   <section class="controls">
     <div class="label">Mando</div>
     <div class="buttons">
-      <button class="on" onclick="command('on')">Encender</button>
-      <button class="off" onclick="command('off')">Apagar</button>
+      <button id="turnOnButton" class="on">Encender</button>
+      <button id="turnOffButton" class="off">Apagar</button>
     </div>
     <div class="buttons">
       <label>Potencia <input id="powerInput" type="number" min="0" max="230" step="1" value="100"></label>
-      <button class="set" onclick="setPower()">Aplicar potencia</button>
+      <button id="setPowerButton" class="set">Aplicar potencia</button>
     </div>
     <div id="message"></div>
   </section>
@@ -254,8 +254,11 @@ async function post(body){
   }catch(error){message(error.message);}
   finally{document.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
-function command(action){post({action});}
-function setPower(){post({action:'power',power:Number(document.getElementById('powerInput').value)});}
+document.getElementById('turnOnButton').addEventListener('click',()=>post({action:'on'}));
+document.getElementById('turnOffButton').addEventListener('click',()=>post({action:'off'}));
+document.getElementById('setPowerButton').addEventListener('click',()=>post({
+  action:'power',power:Number(document.getElementById('powerInput').value)
+}));
 async function update(){
   const banner=document.getElementById('connection');
   try{
