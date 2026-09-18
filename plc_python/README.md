@@ -1,7 +1,8 @@
-# Raspberry PLC 19R - validacion del calentador
+# Raspberry PLC 19R - control del calentador
 
-Prueba de solo lectura para comprobar la comunicacion Modbus RTU entre un
-Industrial Shields Raspberry PLC 19R y el calentador Daobright de 45 kW.
+Control Modbus RTU entre un Industrial Shields Raspberry PLC 19R y el
+calentador Daobright de 45 kW. Puede manejarse desde la pagina web o importarse
+como modulo para usar entradas, salidas y cualquier otra condicion del PLC.
 
 ## Cableado UART TTL
 
@@ -44,12 +45,35 @@ cd /home/RaspPLC1/Ensayos
 python3 control_calentador_plc.py
 ```
 
-Abrir `http://192.168.0.157:8080`. El estado se actualiza cada dos segundos sin
-recargar la pagina. `/api/status` devuelve JSON y `/health` responde 200 cuando
-la lectura Modbus es correcta.
+Abrir `http://192.168.0.157:8080`. La pagina permite encender, apagar y ajustar
+la potencia entre 0 y 230. El estado se actualiza sin recargar la pagina.
+`/api/status` devuelve JSON y `/health` responde 200 cuando la lectura Modbus es
+correcta.
 
-## Seguridad de esta version
+## Uso desde la logica del PLC
 
-El programa no implementa escrituras Modbus. No puede encender, apagar ni
-cambiar la potencia del calentador. Su unico objetivo es validar RX, TX, GND,
-la direccion Modbus y la lectura de los seis registros documentados.
+La clase `HeaterController` es independiente de Flask. Un programa futuro puede
+importarla y usar siempre los mismos metodos:
+
+```python
+from control_calentador_plc import HeaterController
+
+heater = HeaterController()
+heater.set_power(100)
+
+if condicion_de_entradas:
+    heater.turn_on()
+else:
+    heater.turn_off()
+```
+
+Mientras exista una orden de marcha hay que llamar periodicamente a
+`heater.keep_alive_if_due()`. Debe hacerse como minimo una vez cada cuatro
+segundos, porque el calentador exige renovar la orden antes de cinco segundos.
+La aplicacion web incluida ya mantiene esta renovacion en un hilo propio.
+
+Las llamadas estan protegidas para poder compartir una unica instancia entre
+la web y la logica de entradas/salidas. Ante una falla durante la renovacion se
+anula la orden interna de marcha, por lo que el equipo no vuelve a arrancar solo
+cuando regresa la comunicacion. Al cerrar normalmente la aplicacion tambien se
+envia una orden de apagado si estaba en marcha.
