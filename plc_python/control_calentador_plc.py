@@ -254,7 +254,7 @@ async function post(body){
   }catch(error){message(error.message);}
   finally{document.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
-const command=action=>post({action});
+function command(action){post({action});}
 function setPower(){post({action:'power',power:Number(document.getElementById('powerInput').value)});}
 async function update(){
   const banner=document.getElementById('connection');
@@ -303,7 +303,9 @@ def build_app(controller: HeaterController, store: StatusStore) -> Flask:
 
     @app.get("/")
     def index() -> Response:
-        return Response(PAGE, content_type="text/html; charset=utf-8")
+        response = Response(PAGE, content_type="text/html; charset=utf-8")
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/status")
     def api_status() -> Response:
