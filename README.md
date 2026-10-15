@@ -1,251 +1,230 @@
-# Control del calentador con Raspberry PLC 19R
+# Control unificado PFC + calentador + Raspberry PLC
 
-Aplicación Python para controlar un calentador de inducción Daobright de 45 kW
-desde un Industrial Shields Raspberry PLC 19R mediante Modbus RTU sobre UART
-TTL. Incluye una página web y una clase reutilizable para incorporar entradas,
-salidas, temporizadores y otras condiciones del PLC sin depender de la web.
+Aplicacion Python para controlar desde un unico Industrial Shields Raspberry
+PLC 19R:
 
-## Funciones disponibles
+- PFC TonHe TH30F10025C7-WT mediante MCP2515 por SPI/CAN.
+- Calentador de induccion Daobright de 45 kW mediante Modbus RTU por UART TTL.
+- Pagina web unica para consignas, encendido, apagado y diagnostico.
 
-- Lectura de marcha, corriente, frecuencia, temperatura, alarma y potencia.
-- Encendido y apagado desde la página web.
-- Ajuste de potencia entre `0` y `230`.
-- Renovación automática de la orden de marcha cada cuatro segundos.
-- API HTTP para integrar otro sistema de supervisión.
-- Clase `HeaterController` para controlar el equipo directamente desde Python.
-- Acceso serial protegido para compartir el controlador entre la web y la
-  lógica del PLC.
-- Apagado seguro al cerrar normalmente la aplicación.
-- Bloqueo del rearranque automático si falla una renovación de marcha.
+El sistema arranca siempre apagado. No restaura automaticamente una orden de
+marcha despues de reiniciar el programa o el PLC.
 
-## Cableado UART TTL
+## Arquitectura
 
-Realizar el cableado con ambos equipos apagados:
+```text
+Navegador web
+      |
+Raspberry PLC 19R
+      |-- SPI0.1 --> MCP2515/HW-184 --> CAN --> PFC TonHe
+      `-- serial0 --> UART aislada --> Modbus --> Calentador
+```
+
+No se necesita un ESP32 ni una comunicacion Wi-Fi entre controladores. La red
+se utiliza solamente para acceder a la pagina web del PLC.
+
+## Archivos
+
+- `sistema_pfc_calentador.py`: aplicacion unificada y pagina web.
+- `pfc_controller.py`: driver y supervision del PFC por SPI/CAN.
+- `control_calentador_plc.py`: controlador reutilizable del calentador y
+  aplicacion web independiente para diagnostico.
+- `tests/test_combined_controller.py`: pruebas de secuencia y parada segura.
+
+## Secuencia de control
+
+Al pulsar **Encender sistema**:
+
+1. Se envia `OFF` al calentador.
+2. Se configura su nivel de potencia.
+3. Se comprueba comunicacion y ausencia de alarmas.
+4. Se reinicia el MCP2515 y se envia `START` al PFC.
+5. Se espera el tiempo de estabilizacion configurado, por defecto 2 segundos.
+6. Se envia `ON` al calentador.
+
+Al pulsar **APAGAR TODO**, cerrar la aplicacion o detectar una falla:
+
+1. Se cancela el latido y se envia `OFF` al calentador.
+2. Se envia `STOP` al PFC.
+
+El calentador renueva `ON` cada 4 segundos. El PFC transmite su consigna cada
+500 ms y conserva la recuperacion automatica del MCP2515 ante ruido o bus-off.
+
+Provocan una parada conjunta:
+
+- Alarma informada por el calentador.
+- Perdida de comunicacion Modbus durante la marcha.
+- Falla CAN que no puede recuperar el MCP2515.
+- Error al aplicar una nueva potencia durante la marcha.
+
+El software no reemplaza la parada de emergencia cableada, enclavamientos de
+caudal y temperatura, contactores ni protecciones electricas.
+
+## Que significa potencia 0 a 230
+
+`0..230` es la escala digital habilitada al configurar `F-02 = 230`. No son
+watts, amperes ni kilowatts. `0` es el extremo inferior de la escala, pero el
+apagado seguro se realiza siempre con el registro de marcha en `OFF`, no
+solamente escribiendo potencia cero. La interfaz muestra tambien el porcentaje
+de esa escala:
+
+```text
+porcentaje = nivel / 230 * 100
+```
+
+Ejemplos:
+
+| Nivel | Porcentaje de escala |
+|---:|---:|
+| 0 | 0 % |
+| 23 | 10 % |
+| 115 | 50 % |
+| 230 | 100 % |
+
+No debe suponerse que 115 produce exactamente 22,5 kW. La potencia real depende
+de `F-00`, tension de alimentacion, bobina, pieza, acoplamiento, frecuencia,
+limite de corriente y protecciones. Antes de utilizar niveles altos se debe
+medir y construir una tabla de calibracion para la instalacion real.
+
+El calentador es nominalmente de 45 kW y el PFC utilizado admite como maximo
+30 kW. El nivel superior permitido durante la operacion debe determinarse por
+ensayo controlado y no debe exceder los limites del PFC ni del resto del
+sistema.
+
+## Frecuencia y otros parametros
+
+El mapa Modbus documentado solamente permite escribir dos registros:
+
+| Registro | Escritura |
+|---:|---|
+| `0x0000` | `0` apagar, `1` encender |
+| `0x0005` | Nivel de potencia |
+
+Se pueden leer:
+
+| Registro | Lectura |
+|---:|---|
+| `0x0000` | Estado de marcha |
+| `0x0001` | Corriente |
+| `0x0002` | Frecuencia |
+| `0x0003` | Temperatura |
+| `0x0004` | Alarma |
+| `0x0005` | Nivel de potencia |
+
+Por lo tanto, la frecuencia se muestra y supervisa pero no se modifica por
+Modbus. Los limites `F-04` y `F-FH` se configuran localmente desde el panel del
+calentador. No se escriben registros no documentados.
+
+## Cableado
+
+Realizar todas las conexiones con los equipos apagados.
+
+### PFC
+
+- HW-184/MCP2515 con cristal de 8 MHz.
+- SPI en `/dev/spidev0.1`.
+- CAN clasico a 125 kbit/s.
+- Identificador extendido de control `0x080601A0`.
+- Conversor de nivel de 3,3 V a 5 V en SPI.
+- CAN-H y CAN-L con terminacion correcta.
+
+La linea `INT` no es necesaria para esta version.
+
+### Calentador
 
 | Calentador | Raspberry PLC 19R |
 |---|---|
-| TX | RX (GPIO15) |
-| RX | TX (GPIO14) |
-| GND | GND |
-| VCC | Sin conectar |
+| TX | RX / GPIO15 |
+| RX | TX / GPIO14 |
+| GND | Referencia de la interfaz aislada |
+| VCC | No conectar |
 
-Este proyecto usa el puerto TTL `/dev/serial0`. No se deben conectar RX y TX
-del calentador a los bornes RS-485 A+/B- ni conectar VCC entre los equipos.
+Puerto Linux: `/dev/serial0`, 9600 baudios, 8 bits, sin paridad, 1 bit de
+parada. Direccion Modbus predeterminada: 1 (`F-03 = 1`).
 
-La UART TTL directa no proporciona aislamiento galvánico ni la inmunidad al
-ruido de RS-485. Es útil para pruebas con cable corto. Para una instalación
-definitiva junto a un calentador de 45 kW se recomienda una interfaz aislada y
-las protecciones eléctricas correspondientes.
+Una UART TTL directa no tiene inmunidad industrial ni aislamiento galvanico.
+Para la instalacion definitiva junto a equipos de 30/45 kW se recomienda una
+interfaz UART aislada, alimentacion aislada, cable corto y separacion respecto
+de conductores de potencia.
 
-## Configuración de comunicación
-
-- Calentador: `F-02 = 230` para habilitar el control por comunicación.
-- Dirección del calentador: `F-03 = 1`.
-- Protocolo: Modbus RTU.
-- UART: 9600 baudios, 8 bits, sin paridad y 1 bit de parada (`9600 8N1`).
-- Puerto Linux: `/dev/serial0`.
-- Registro `0`: marcha, usando `1` para encender y `0` para apagar.
-- Registro `5`: potencia, con valores entre `0` y `230`.
-
-## Instalación
-
-Los archivos están instalados en el PLC en:
-
-```text
-/home/RaspPLC1/Ensayos/calentador_plc
-```
-
-Para instalar las dependencias en otro equipo:
+## Instalacion prevista en el PLC
 
 ```bash
-cd /home/RaspPLC1/Ensayos/calentador_plc
+cd /home/nferraro/Documents/pfc_calentador_plc
 python3 -m pip install -r requirements.txt
 ```
 
-El usuario que ejecute el programa debe tener acceso a `/dev/serial0`,
-normalmente mediante el grupo `dialout`.
-
-## Ejecución
-
-Realizar una sola lectura y mostrar el resultado como JSON:
-
-```bash
-cd /home/RaspPLC1/Ensayos/calentador_plc
-python3 control_calentador_plc.py --once
-```
-
-Iniciar el controlador y la página web:
-
-```bash
-cd /home/RaspPLC1/Ensayos/calentador_plc
-python3 control_calentador_plc.py
-```
-
-La página queda disponible en:
+El usuario debe pertenecer a los grupos `spi` y `dialout`, y deben existir:
 
 ```text
-http://192.168.0.157:8080/
+/dev/spidev0.1
+/dev/serial0
 ```
 
-El servidor escucha en `0.0.0.0:8080`. En el PLC probado, el firewall permite
-ese puerto solamente desde la red local `192.168.0.0/24`.
+No se deben ejecutar simultaneamente el controlador unificado, el controlador
+PFC anterior o la aplicacion independiente del calentador. Los programas usan
+los mismos puertos fisicos.
 
-Actualmente el proceso se inicia manualmente y no está configurado como
-servicio de arranque. Si se reinicia el PLC, hay que volver a ejecutar el
-programa o instalar posteriormente una unidad `systemd`.
+## Primera comprobacion sin encender
 
-## API HTTP
+El modo siguiente fuerza `OFF` y `STOP`, consulta ambos equipos, imprime JSON y
+termina:
 
-Estado del equipo:
-
-```http
-GET /api/status
+```bash
+python3 sistema_pfc_calentador.py --check-only
 ```
 
-Comprobar que la comunicación está activa:
+No envia ninguna orden `START` u `ON`.
 
-```http
-GET /health
+## Uso normal
+
+```bash
+python3 sistema_pfc_calentador.py
 ```
 
-Encender:
+Abrir desde un equipo de la misma red:
 
-```http
-POST /api/control
-Content-Type: application/json
-
-{"action":"on"}
+```text
+http://192.168.0.149:8080/
 ```
 
-Apagar:
+La pagina permite:
 
-```http
-POST /api/control
-Content-Type: application/json
+- Introducir tension y corriente del PFC.
+- Introducir el nivel `0..230` del calentador.
+- Arrancar el conjunto con la secuencia coordinada.
+- Cambiar el nivel de potencia durante la marcha.
+- Apagar ambos equipos.
+- Consultar estado CAN, recuperaciones, corriente, frecuencia, temperatura y
+  alarmas.
+- Forzar una recuperacion CAN del PFC.
 
-{"action":"off"}
+La pagina no tiene autenticacion. El puerto 8080 debe quedar restringido a una
+red local confiable y nunca exponerse directamente a Internet.
+
+## Opciones principales
+
+```text
+--serial-device /dev/serial0
+--slave 1
+--spi-bus 0
+--spi-device 1
+--spi-speed 500000
+--stabilization 2
+--listen 0.0.0.0
+--port 8080
+--log-file ~/Documents/control-pfc-calentador.log
 ```
 
-Cambiar la potencia:
+El registro rota automaticamente para evitar crecimiento ilimitado.
 
-```http
-POST /api/control
-Content-Type: application/json
+## Pruebas de software
 
-{"action":"power","power":100}
+Las pruebas no abren SPI ni UART y no pueden encender los equipos:
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
-## Uso desde la lógica del PLC
-
-La clase `HeaterController` no depende de Flask. La página web es solamente un
-cliente de esta misma interfaz; la lógica de control puede llamar directamente
-a sus métodos:
-
-### Programa autónomo sin página web
-
-No es necesario iniciar Flask ni realizar peticiones HTTP. El programa debe
-importar `HeaterController`, crear una sola instancia y conservarla durante
-toda la ejecución. El ciclo normal es:
-
-1. Crear `HeaterController()` para abrir `/dev/serial0` a 9600 8N1.
-2. Configurar la potencia con `set_power()` cuando sea necesario.
-3. Evaluar las entradas, sensores, temporizadores y condiciones del PLC.
-4. Llamar a `turn_on()` cuando aparece una solicitud de marcha.
-5. Mientras continúe la solicitud, ejecutar `keep_alive_if_due()` varias veces
-   por segundo. El método solamente transmite cuando corresponde.
-6. Llamar inmediatamente a `turn_off()` cuando desaparece la solicitud o surge
-   una condición de seguridad.
-7. Consultar `read_status()` para comprobar marcha real, alarma y mediciones.
-8. Al terminar el programa, apagar el equipo y ejecutar `close()`.
-
-Ejemplo de estructura para un programa autónomo:
-
-```python
-import time
-
-from control_calentador_plc import HeaterController
-
-
-heater = HeaterController()
-heater.set_power(100)
-
-try:
-    while True:
-        # Sustituir por la lectura real de entradas, sensores o condiciones.
-        solicitud_de_marcha = leer_condiciones_del_plc()
-
-        if solicitud_de_marcha and not heater.requested_on:
-            heater.turn_on()
-        elif not solicitud_de_marcha and heater.requested_on:
-            heater.turn_off()
-
-        # Debe ejecutarse con frecuencia mientras exista una orden de marcha.
-        heater.keep_alive_if_due()
-
-        estado = heater.read_status()
-        usar_estado_en_la_logica(estado)
-        time.sleep(0.1)
-finally:
-    if heater.requested_on:
-        heater.turn_off()
-    heater.close()
-```
-
-Este ejemplo no inicia ningún servidor web. `leer_condiciones_del_plc()` debe
-reemplazarse por la lógica real que lea las entradas y demás señales del
-Industrial Shields. `usar_estado_en_la_logica()` puede generar alarmas, cambiar
-salidas o detener el proceso según `estado.online`, `estado.switch` y
-`estado.alarm`.
-
-### Comunicación Modbus realizada por la clase
-
-Para un programa futuro que prefiera implementar el protocolo directamente, la
-comunicación utilizada es:
-
-| Operación | Función Modbus | Registro | Valor |
-|---|---:|---:|---:|
-| Leer estado | `03` | Desde `0` | 6 registros |
-| Encender | `06` | `0` | `1` |
-| Apagar | `06` | `0` | `0` |
-| Configurar potencia | `06` | `5` | `0` a `230` |
-| Renovar marcha | `06` | `0` | `1` cada 4 segundos |
-
-La dirección de esclavo es `1`, salvo que se cambie `F-03`. La biblioteca
-`minimalmodbus` forma las tramas RTU, calcula y verifica el CRC y controla los
-tiempos de la UART. Por eso, para la lógica futura se recomienda usar los
-métodos de `HeaterController` en lugar de construir manualmente las tramas.
-
-Enviar `turn_on()` una sola vez no es suficiente: si el registro de marcha no
-se renueva antes de cinco segundos, el calentador se detiene. La aplicación web
-y el ejemplo autónomo resuelven esta condición mediante
-`keep_alive_if_due()`.
-
-Métodos principales:
-
-| Método | Función |
-|---|---|
-| `turn_on()` | Envía la orden de encendido y habilita la renovación |
-| `turn_off()` | Cancela la renovación y envía el apagado |
-| `set_power(valor)` | Escribe una potencia entera entre 0 y 230 |
-| `keep_alive_if_due()` | Renueva la marcha si transcurrieron cuatro segundos |
-| `read_status()` | Devuelve un objeto `HeaterStatus` con las mediciones |
-| `close()` | Cierra el puerto serial |
-
-El calentador exige renovar la orden de encendido antes de cinco segundos. La
-aplicación web ya lo hace desde su hilo supervisor. Un programa propio debe
-llamar frecuentemente a `keep_alive_if_due()`, como muestra el ejemplo.
-
-No se deben ejecutar simultáneamente dos procesos que intenten abrir
-`/dev/serial0`. La web y la lógica de entradas/salidas deben compartir una sola
-instancia de `HeaterController` dentro del mismo proceso.
-
-## Seguridad
-
-Un calentador de 45 kW puede producir lesiones, incendios y daños materiales.
-El software no sustituye enclavamientos físicos, parada de emergencia,
-protección por caudal de refrigeración, límites de temperatura ni protecciones
-eléctricas. Las salidas críticas deben llevar el equipo a un estado seguro ante
-la pérdida de alimentación, comunicación o ejecución del programa.
-
-La página web actual no tiene autenticación y debe permanecer restringida a una
-red local confiable. No se recomienda publicar el puerto `8080` en Internet.
+Verifican la secuencia de arranque y parada, alarmas, perdida de comunicacion,
+falla CAN, escala de potencia y codificacion de la trama PFC.

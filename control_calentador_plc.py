@@ -7,6 +7,7 @@ import argparse
 import atexit
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -50,14 +51,28 @@ class HeaterController:
     por el calentador. La aplicacion incluida ya lo hace automaticamente.
     """
 
-    def __init__(self, device: str = DEFAULT_DEVICE, slave_address: int = DEFAULT_SLAVE_ADDRESS) -> None:
-        self._instrument = minimalmodbus.Instrument(
-            device,
-            slave_address,
-            mode=minimalmodbus.MODE_RTU,
-            close_port_after_each_call=False,
-            debug=False,
-        )
+    def __init__(
+        self,
+        device: str = DEFAULT_DEVICE,
+        slave_address: int = DEFAULT_SLAVE_ADDRESS,
+        acquire_process_lock: bool = True,
+    ) -> None:
+        self._process_lock: Any | None = None
+        if acquire_process_lock:
+            self._acquire_process_lock()
+        try:
+            self._instrument = minimalmodbus.Instrument(
+                device,
+                slave_address,
+                mode=minimalmodbus.MODE_RTU,
+                close_port_after_each_call=False,
+                debug=False,
+            )
+        except Exception:
+            if self._process_lock is not None:
+                self._process_lock.close()
+                self._process_lock = None
+            raise
         self._instrument.serial.baudrate = 9600
         self._instrument.serial.bytesize = 8
         self._instrument.serial.parity = serial.PARITY_NONE
@@ -69,6 +84,26 @@ class HeaterController:
         self._command_lock = threading.Lock()
         self._requested_on = False
         self._last_keepalive = 0.0
+
+    def _acquire_process_lock(self) -> None:
+        try:
+            import fcntl
+        except ImportError:
+            # fcntl no existe en Windows; el PLC de produccion utiliza Linux.
+            return
+        lock_file = open(
+            "/tmp/control-calentador-serial.lock", "w", encoding="ascii"
+        )
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            lock_file.close()
+            raise RuntimeError(
+                "Ya hay otra instancia controlando el calentador"
+            ) from exc
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        self._process_lock = lock_file
 
     @property
     def requested_on(self) -> bool:
@@ -173,6 +208,9 @@ class HeaterController:
         with self._io_lock:
             if self._instrument.serial.is_open:
                 self._instrument.serial.close()
+            if self._process_lock is not None:
+                self._process_lock.close()
+                self._process_lock = None
 
 
 class StatusStore:
@@ -288,7 +326,24 @@ def supervise_forever(controller: HeaterController, store: StatusStore, stop: th
     while not stop.is_set():
         try:
             controller.keep_alive_if_due()
-            store.set(controller.read_status())
+            status = controller.read_status()
+            if controller.requested_on and (
+                not status.online or status.alarm not in {None, 0}
+            ):
+                reason = (
+                    f"alarma {status.alarm}"
+                    if status.online
+                    else f"perdida de comunicacion: {status.error}"
+                )
+                try:
+                    controller.turn_off()
+                except Exception:
+                    logging.exception(
+                        "No se pudo confirmar OFF despues de %s", reason
+                    )
+                status.requested_on = False
+                status.error = f"Apagado de seguridad por {reason}"
+            store.set(status)
         except (minimalmodbus.ModbusException, serial.SerialException, OSError) as exc:
             store.set(
                 HeaterStatus(
