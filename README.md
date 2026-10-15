@@ -35,11 +35,12 @@ se utiliza solamente para acceder a la pagina web del PLC.
 
 Al pulsar **Encender sistema**:
 
-1. Se envia `OFF` al calentador.
-2. Se configura su nivel de potencia.
-3. Se comprueba comunicacion y ausencia de alarmas.
-4. Se reinicia el MCP2515 y se envia `START` al PFC.
-5. Se espera el tiempo de estabilizacion configurado, por defecto 2 segundos.
+1. Se reinicia el MCP2515 y se envia `START` al PFC.
+2. Se espera el tiempo de estabilizacion configurado, por defecto 2 segundos.
+3. Como el PFC alimenta al calentador, se espera hasta 10 segundos a que este
+   responda por Modbus.
+4. Se envia `OFF` al calentador y se configura su nivel de potencia.
+5. Se comprueba nuevamente la comunicacion y la ausencia de alarmas.
 6. Se envia `ON` al calentador.
 
 Al pulsar **APAGAR TODO**, cerrar la aplicacion o detectar una falla:
@@ -167,14 +168,16 @@ los mismos puertos fisicos.
 
 ## Primera comprobacion sin encender
 
-El modo siguiente fuerza `OFF` y `STOP`, consulta ambos equipos, imprime JSON y
-termina:
+El modo siguiente intenta `OFF`, fuerza `STOP`, imprime el estado y termina:
 
 ```bash
 python3 sistema_pfc_calentador.py --check-only
 ```
 
-No envia ninguna orden `START` u `ON`.
+No envia ninguna orden `START` u `ON`. Como el calentador recibe su alimentacion
+del PFC, es normal que aparezca sin respuesta en esta comprobacion con el PFC
+apagado. Su comunicacion se verifica durante la secuencia normal, despues de
+arrancar y estabilizar el PFC.
 
 ## Uso normal
 

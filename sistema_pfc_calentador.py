@@ -23,6 +23,7 @@ from pfc_controller import PFCController, PFCError, PFCStatus, validate_start_va
 
 DEFAULT_HTTP_PORT = 8080
 DEFAULT_STABILIZATION_SECONDS = 2.0
+HEATER_READY_TIMEOUT_SECONDS = 10.0
 HEATER_POLL_SECONDS = 1.0
 SUPERVISOR_PERIOD_SECONDS = 0.1
 
@@ -92,6 +93,7 @@ class CombinedController:
         self._heater_status = HeaterStatus()
         self._last_heater_poll = 0.0
         self._start_deadline = 0.0
+        self._heater_ready_deadline = 0.0
         self._closed = False
 
     def _set_message(self, message: str, is_error: bool = False) -> None:
@@ -112,51 +114,46 @@ class CombinedController:
         return ALARM_TEXT.get(code, f"codigo 0x{code:02X}")
 
     def safe_startup(self) -> None:
-        """Fuerza OFF en calentador y PFC antes de aceptar ordenes."""
+        """Intenta apagar la carga y fuerza STOP en el PFC."""
         with self._commands, self._lock:
-            errors: list[str] = []
+            heater_warning = ""
+            pfc_error = ""
             try:
                 self.heater.turn_off()
             except Exception as exc:
-                errors.append(f"calentador: {exc}")
+                # El PFC alimenta al calentador. Si el PFC ya estaba apagado,
+                # no puede existir respuesta Modbus y esto es esperable.
+                heater_warning = str(exc)
             try:
                 self.pfc.stop()
             except Exception as exc:
-                errors.append(f"PFC: {exc}")
-            self._state.mode = "fault" if errors else "off"
+                pfc_error = str(exc)
+            self._state.mode = "fault" if pfc_error else "off"
             self._state.pfc_voltage_v = 0.0
             self._state.pfc_current_a = 0.0
-            if errors:
+            if pfc_error:
                 self._set_message(
-                    "Arranque en parada, pero sin confirmacion: " + "; ".join(errors),
+                    "No se pudo confirmar STOP del PFC: " + pfc_error,
                     True,
+                )
+            elif heater_warning:
+                self._set_message(
+                    "PFC detenido; calentador sin alimentacion o sin respuesta "
+                    "(estado esperado con el PFC apagado)"
                 )
             else:
                 self._set_message("Arranque seguro confirmado: sistema apagado")
 
     def start_system(self, voltage: float, current: float, heater_power: int) -> None:
-        """Apaga la carga, arranca el PFC y luego habilita el calentador."""
+        """Arranca el PFC y habilita el calentador cuando ya tiene alimentacion."""
         validate_start_values(voltage, current)
         validate_heater_power(heater_power)
         with self._commands, self._lock:
             if self._state.mode in {"starting", "running", "stopping"}:
                 raise SystemControlError("Primero detenga el sistema")
             self._state.mode = "starting"
-            self._set_message("Preparando calentador y arrancando PFC")
+            self._set_message("Arrancando PFC para alimentar el calentador")
             try:
-                self.heater.turn_off()
-                self.heater.set_power(heater_power)
-                status = self.heater.read_status()
-                self._heater_status = status
-                if not status.online:
-                    raise SystemControlError(
-                        f"El calentador no responde: {status.error}"
-                    )
-                if status.alarm not in {None, 0}:
-                    raise SystemControlError(
-                        "El calentador informa "
-                        + self._alarm_description(status.alarm)
-                    )
                 self.pfc.start(voltage, current)
             except Exception as exc:
                 self._safe_stop_locked(f"Fallo durante el arranque: {exc}", fault=True)
@@ -166,6 +163,9 @@ class CombinedController:
             self._state.pfc_current_a = float(current)
             self._state.heater_power_level = heater_power
             self._start_deadline = time.monotonic() + self.stabilization_seconds
+            self._heater_ready_deadline = (
+                self._start_deadline + HEATER_READY_TIMEOUT_SECONDS
+            )
             self._set_message(
                 f"PFC solicitado; esperando {self.stabilization_seconds:g} s antes del calentador"
             )
@@ -185,6 +185,7 @@ class CombinedController:
         self._state.pfc_voltage_v = 0.0
         self._state.pfc_current_a = 0.0
         self._start_deadline = 0.0
+        self._heater_ready_deadline = 0.0
         self._state.mode = "fault" if fault or errors else "off"
         message = reason
         if errors:
@@ -242,7 +243,7 @@ class CombinedController:
                     self._heater_status = self.heater.read_status()
                     self._last_heater_poll = now
 
-                if self._state.mode in {"starting", "running"}:
+                if self._state.mode == "running":
                     if not self._heater_status.online:
                         raise SystemControlError(
                             "se perdio la comunicacion con el calentador: "
@@ -260,6 +261,32 @@ class CombinedController:
                         raise SystemControlError(
                             "el PFC no tiene una transmision CAN valida"
                         )
+                    if not self._heater_status.online:
+                        if now >= self._heater_ready_deadline:
+                            raise SystemControlError(
+                                "el calentador no respondio despues de recibir "
+                                "alimentacion: " + self._heater_status.error
+                            )
+                        self._set_message(
+                            "PFC encendido; esperando que el calentador inicie"
+                        )
+                        return
+
+                    # Ahora que el calentador tiene alimentacion, confirmar OFF,
+                    # aplicar la consigna y comprobar alarmas antes de habilitarlo.
+                    self.heater.turn_off()
+                    self.heater.set_power(self._state.heater_power_level)
+                    self._heater_status = self.heater.read_status()
+                    if not self._heater_status.online:
+                        raise SystemControlError(
+                            "el calentador dejo de responder durante el arranque: "
+                            + self._heater_status.error
+                        )
+                    if self._heater_status.alarm not in {None, 0}:
+                        raise SystemControlError(
+                            "el calentador informa "
+                            + self._alarm_description(self._heater_status.alarm)
+                        )
                     self.heater.turn_on()
                     self._state.mode = "running"
                     self._set_message("PFC y calentador encendidos")
@@ -273,8 +300,14 @@ class CombinedController:
         with self._lock:
             state = asdict(self._state)
             if self._state.mode == "starting":
+                now = time.monotonic()
+                deadline = (
+                    self._start_deadline
+                    if now < self._start_deadline
+                    else self._heater_ready_deadline
+                )
                 state["transition_remaining_s"] = round(
-                    max(0.0, self._start_deadline - time.monotonic()), 1
+                    max(0.0, deadline - now), 1
                 )
             else:
                 state["transition_remaining_s"] = 0.0
@@ -450,7 +483,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--check-only",
         action="store_true",
-        help="fuerza OFF/STOP, imprime el estado de ambos equipos y termina",
+        help="intenta OFF, fuerza STOP, imprime el estado y termina",
     )
     parser.add_argument(
         "--log-file", default="~/Documents/control-pfc-calentador.log"
@@ -479,9 +512,10 @@ def main() -> int:
                 )
             )
             status = combined.status_payload()
+            heater_alarm = status["heater"]["alarm"]
             return 0 if (
                 status["pfc"]["communication_ok"]
-                and status["heater"]["online"]
+                and heater_alarm in {None, 0}
             ) else 1
         supervisor = threading.Thread(
             target=supervise_forever,

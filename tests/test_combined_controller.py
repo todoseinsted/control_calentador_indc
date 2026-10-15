@@ -22,7 +22,12 @@ if "serial" not in sys.modules:
     sys.modules["serial"] = serial
 
 from control_calentador_plc import HeaterStatus
-from pfc_controller import PFCController, PFCStatus, build_control_payload
+from pfc_controller import (
+    PFCController,
+    PFCStatus,
+    build_control_payload,
+    health_has_tx_error,
+)
 from sistema_pfc_calentador import CombinedController, power_level_percent
 
 
@@ -129,7 +134,29 @@ class CombinedControllerTests(unittest.TestCase):
         self.start_running()
         self.assertEqual(
             self.events,
-            ["heater.off", "heater.power:115", "pfc.start", "heater.on"],
+            ["pfc.start", "heater.off", "heater.power:115", "heater.on"],
+        )
+
+    def test_start_waits_for_heater_powered_by_pfc(self) -> None:
+        self.heater.current.online = False
+        self.heater.current.error = "sin alimentacion"
+        self.controller.start_system(311.0, 10.0, 5)
+        self.controller.service()
+        self.assertEqual(self.events, ["pfc.start"])
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "starting"
+        )
+
+        self.heater.current.online = True
+        self.heater.current.error = ""
+        self.controller._last_heater_poll = 0.0
+        self.controller.service()
+        self.assertEqual(
+            self.events,
+            ["pfc.start", "heater.off", "heater.power:5", "heater.on"],
+        )
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "running"
         )
 
     def test_stop_orders_heater_off_before_pfc_stop(self) -> None:
@@ -176,6 +203,13 @@ class CombinedControllerTests(unittest.TestCase):
     def test_pfc_payload_encodes_311_volts_and_10_amps(self) -> None:
         payload = build_control_payload(311.0, 10.0, True)
         self.assertEqual(payload, bytes.fromhex("AA 00 26 0C E8 03 00 00"))
+
+    def test_receive_overflow_without_int_is_not_a_transmit_error(self) -> None:
+        self.assertFalse(
+            health_has_tx_error(
+                {"tx_ctrl": 0, "eflg": 0xC0, "tec": 0, "rec": 0}
+            )
+        )
 
     def test_pfc_start_reinitializes_and_sends_start(self) -> None:
         mcp = FakeMCP()
