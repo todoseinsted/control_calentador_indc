@@ -33,6 +33,15 @@ se utiliza solamente para acceder a la pagina web del PLC.
 
 ## Secuencia de control
 
+El PFC y el calentador se pueden manejar por separado:
+
+- **Encender solo PFC** aplica la consigna CAN y mantiene el registro de marcha
+  del calentador en `OFF` cuando este termina de iniciar.
+- **Encender calentador** requiere que el PFC ya este encendido. Configura la
+  potencia, comprueba comunicacion y alarmas, y finalmente envia `ON`.
+- **Apagar calentador** envia `OFF` pero conserva el PFC encendido.
+- **APAGAR TODO** envia primero `OFF` al calentador y despues `STOP` al PFC.
+
 Al pulsar **Encender sistema**:
 
 1. Se reinicia el MCP2515 y se envia `START` al PFC.
@@ -188,13 +197,15 @@ python3 sistema_pfc_calentador.py
 Abrir desde un equipo de la misma red:
 
 ```text
-http://192.168.0.149:8080/
+http://IP_DEL_PLC:8080/
 ```
 
 La pagina permite:
 
 - Introducir tension y corriente del PFC.
 - Introducir el nivel `0..230` del calentador.
+- Encender solamente el PFC y mantener apagado el calentador.
+- Encender o apagar el calentador sin detener el PFC.
 - Arrancar el conjunto con la secuencia coordinada.
 - Cambiar el nivel de potencia durante la marcha.
 - Apagar ambos equipos.
@@ -204,6 +215,32 @@ La pagina permite:
 
 La pagina no tiene autenticacion. El puerto 8080 debe quedar restringido a una
 red local confiable y nunca exponerse directamente a Internet.
+
+## Control por terminal
+
+Todas las operaciones de la pagina utilizan la misma API HTTP:
+
+```bash
+# Encender solamente el PFC
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"start_pfc","voltage":311,"current":10}' \
+  http://IP_DEL_PLC:8080/api/control
+
+# Encender el calentador con el PFC ya activo
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"start_heater","heater_power":5}' \
+  http://IP_DEL_PLC:8080/api/control
+
+# Apagar solamente el calentador
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"stop_heater"}' \
+  http://IP_DEL_PLC:8080/api/control
+
+# Apagar calentador y PFC
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"stop"}' \
+  http://IP_DEL_PLC:8080/api/control
+```
 
 ## Opciones principales
 

@@ -137,6 +137,54 @@ class CombinedControllerTests(unittest.TestCase):
             ["pfc.start", "heater.off", "heater.power:115", "heater.on"],
         )
 
+    def test_start_pfc_keeps_heater_off(self) -> None:
+        self.controller.start_pfc(311.0, 10.0)
+        self.assertEqual(self.events, ["pfc.start"])
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "pfc_on"
+        )
+        self.assertTrue(self.pfc.current.requested_on)
+        self.assertFalse(self.heater.requested_on)
+
+        self.controller.service()
+        self.assertEqual(self.events, ["pfc.start", "heater.off"])
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "pfc_on"
+        )
+
+    def test_start_heater_after_pfc_is_already_on(self) -> None:
+        self.controller.start_pfc(311.0, 10.0)
+        self.controller.start_heater(5)
+        self.controller.service()
+        self.assertEqual(
+            self.events,
+            ["pfc.start", "heater.off", "heater.power:5", "heater.on"],
+        )
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "running"
+        )
+
+    def test_stop_heater_keeps_pfc_on(self) -> None:
+        self.start_running()
+        self.events.clear()
+        self.controller.stop_heater()
+        self.assertEqual(self.events, ["heater.off"])
+        self.assertTrue(self.pfc.current.requested_on)
+        self.assertFalse(self.heater.requested_on)
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "pfc_on"
+        )
+
+    def test_pfc_only_tolerates_unavailable_heater(self) -> None:
+        self.heater.current.online = False
+        self.heater.current.error = "sin respuesta"
+        self.controller.start_pfc(311.0, 10.0)
+        self.controller.service()
+        self.assertEqual(
+            self.controller.status_payload()["system"]["mode"], "pfc_on"
+        )
+        self.assertTrue(self.pfc.current.requested_on)
+
     def test_start_waits_for_heater_powered_by_pfc(self) -> None:
         self.heater.current.online = False
         self.heater.current.error = "sin alimentacion"

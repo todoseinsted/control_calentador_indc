@@ -94,6 +94,7 @@ class CombinedController:
         self._last_heater_poll = 0.0
         self._start_deadline = 0.0
         self._heater_ready_deadline = 0.0
+        self._heater_off_confirmed = False
         self._closed = False
 
     def _set_message(self, message: str, is_error: bool = False) -> None:
@@ -149,6 +150,10 @@ class CombinedController:
         validate_start_values(voltage, current)
         validate_heater_power(heater_power)
         with self._commands, self._lock:
+            if self._state.mode == "pfc_on":
+                raise SystemControlError(
+                    "El PFC ya esta encendido; use Encender calentador"
+                )
             if self._state.mode in {"starting", "running", "stopping"}:
                 raise SystemControlError("Primero detenga el sistema")
             self._state.mode = "starting"
@@ -166,9 +171,88 @@ class CombinedController:
             self._heater_ready_deadline = (
                 self._start_deadline + HEATER_READY_TIMEOUT_SECONDS
             )
+            self._heater_off_confirmed = False
             self._set_message(
                 f"PFC solicitado; esperando {self.stabilization_seconds:g} s antes del calentador"
             )
+
+    def start_pfc(self, voltage: float, current: float) -> None:
+        """Enciende solamente el PFC y mantiene el calentador en OFF."""
+        validate_start_values(voltage, current)
+        with self._commands, self._lock:
+            if self._state.mode in {"pfc_on", "starting", "running", "stopping"}:
+                raise SystemControlError("Primero detenga el sistema")
+            try:
+                self.pfc.start(voltage, current)
+            except Exception as exc:
+                self._safe_stop_locked(
+                    f"Fallo al arrancar solamente el PFC: {exc}", fault=True
+                )
+                raise SystemControlError(str(exc)) from exc
+
+            self._state.mode = "pfc_on"
+            self._state.pfc_voltage_v = float(voltage)
+            self._state.pfc_current_a = float(current)
+            self._start_deadline = time.monotonic() + self.stabilization_seconds
+            self._heater_ready_deadline = 0.0
+            self._heater_off_confirmed = False
+            self._last_heater_poll = 0.0
+            self._set_message("PFC encendido; calentador apagado")
+
+    def start_heater(self, heater_power: int) -> None:
+        """Enciende el calentador cuando el PFC ya esta funcionando."""
+        validate_heater_power(heater_power)
+        with self._commands, self._lock:
+            if self._state.mode != "pfc_on":
+                raise SystemControlError(
+                    "Para encender el calentador, primero encienda solamente el PFC"
+                )
+            pfc_status = self.pfc.status()
+            if not pfc_status.requested_on or not pfc_status.communication_ok:
+                raise SystemControlError("El PFC no esta disponible")
+
+            now = time.monotonic()
+            self._state.mode = "starting"
+            self._state.heater_power_level = heater_power
+            self._start_deadline = max(now, self._start_deadline)
+            self._heater_ready_deadline = (
+                self._start_deadline + HEATER_READY_TIMEOUT_SECONDS
+            )
+            self._heater_off_confirmed = False
+            self._last_heater_poll = 0.0
+            self._set_message("Esperando el calentador para habilitarlo")
+
+    def stop_heater(self) -> None:
+        """Apaga el calentador y conserva el PFC encendido."""
+        with self._commands, self._lock:
+            if self._state.mode == "pfc_on":
+                self._set_message("PFC encendido; calentador ya estaba apagado")
+                return
+            if self._state.mode not in {"starting", "running"}:
+                raise SystemControlError("El PFC no esta encendido")
+
+            # Durante la espera el calentador todavia no recibio ON. Cancelar
+            # la transicion basta; el supervisor confirmara OFF cuando responda.
+            if self._state.mode == "starting" and not self.heater.requested_on:
+                self._state.mode = "pfc_on"
+                self._heater_off_confirmed = False
+                self._start_deadline = 0.0
+                self._heater_ready_deadline = 0.0
+                self._set_message("PFC encendido; arranque del calentador cancelado")
+                return
+
+            try:
+                self.heater.turn_off()
+            except Exception as exc:
+                self._safe_stop_locked(
+                    f"No se pudo confirmar OFF del calentador: {exc}", fault=True
+                )
+                raise SystemControlError(str(exc)) from exc
+            self._state.mode = "pfc_on"
+            self._heater_off_confirmed = True
+            self._start_deadline = 0.0
+            self._heater_ready_deadline = 0.0
+            self._set_message("PFC encendido; calentador apagado")
 
     def _safe_stop_locked(self, reason: str, fault: bool) -> None:
         self._state.mode = "stopping"
@@ -186,6 +270,7 @@ class CombinedController:
         self._state.pfc_current_a = 0.0
         self._start_deadline = 0.0
         self._heater_ready_deadline = 0.0
+        self._heater_off_confirmed = False
         self._state.mode = "fault" if fault or errors else "off"
         message = reason
         if errors:
@@ -255,6 +340,22 @@ class CombinedController:
                             + self._alarm_description(self._heater_status.alarm)
                         )
 
+                if self._state.mode == "pfc_on" and self._heater_status.online:
+                    if (
+                        not self._heater_off_confirmed
+                        or self._heater_status.switch == 1
+                    ):
+                        self.heater.turn_off()
+                        self._heater_status = self.heater.read_status()
+                        if (
+                            not self._heater_status.online
+                            or self._heater_status.switch != 0
+                        ):
+                            raise SystemControlError(
+                                "no se pudo confirmar el calentador apagado"
+                            )
+                        self._heater_off_confirmed = True
+
                 if self._state.mode == "starting" and now >= self._start_deadline:
                     pfc_status = self.pfc.status()
                     if not pfc_status.requested_on or not pfc_status.communication_ok:
@@ -288,10 +389,11 @@ class CombinedController:
                             + self._alarm_description(self._heater_status.alarm)
                         )
                     self.heater.turn_on()
+                    self._heater_off_confirmed = False
                     self._state.mode = "running"
                     self._set_message("PFC y calentador encendidos")
             except Exception as exc:
-                if self._state.mode in {"starting", "running"}:
+                if self._state.mode in {"pfc_on", "starting", "running"}:
                     self._safe_stop_locked(str(exc), fault=True)
                 else:
                     self._set_message(f"Fallo de supervision: {exc}", True)
@@ -354,12 +456,16 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 @media(max-width:700px){.grid{grid-template-columns:1fr 1fr}}@media(max-width:480px){.grid{grid-template-columns:1fr}.fields>*{width:100%}input{width:100%}}
 </style></head><body><main class="wrap">
 <div class="card"><h1>Sistema PFC + calentador</h1><div class="muted">Raspberry PLC 19R</div><div id="message">Consultando...</div></div>
-<div class="card"><h2>Arranque coordinado</h2><div class="fields">
+<div class="card"><h2>Control independiente y coordinado</h2><div class="fields">
 <label>Tension PFC (V)<input id="voltage" type="number" min="150" max="1000" step="0.1" value="311"></label>
 <label>Corriente PFC (A)<input id="currentSet" type="number" min="2" max="120" step="0.01" value="10"></label>
 <label>Potencia calentador (0-230)<input id="heaterPowerSet" type="number" min="0" max="230" step="1" value="10"></label>
-<button class="start" onclick="startSystem()">Encender sistema</button><button class="stop" onclick="command({action:'stop'})">APAGAR TODO</button>
-</div><p class="note">0-230 es una escala de mando, no son watts. Nivel 0 no reemplaza la orden OFF. El calentador se habilita despues de estabilizar el PFC.</p></div>
+<button class="start" onclick="startPfc()">Encender solo PFC</button>
+<button class="start" onclick="startHeater()">Encender calentador</button>
+<button class="start" onclick="startSystem()">Encender ambos</button>
+<button class="secondary" onclick="command({action:'stop_heater'})">Apagar calentador</button>
+<button class="stop" onclick="command({action:'stop'})">APAGAR TODO</button>
+</div><p class="note">Puede mantener el PFC encendido con el calentador apagado. Para encender el calentador por separado, primero encienda el PFC. APAGAR TODO envia OFF al calentador antes de detener el PFC. 0-230 es una escala de mando, no son watts.</p></div>
 <div class="card"><h2>PFC</h2><div class="grid">
 <div class="item"><div class="label">Orden</div><div id="pfcOrder" class="value">-</div></div>
 <div class="item"><div class="label">Consigna</div><div id="pfcSet" class="value">-</div></div>
@@ -381,6 +487,8 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 const el=id=>document.getElementById(id); const show=(id,v)=>el(id).textContent=(v??'-');
 async function command(body){document.querySelectorAll('button').forEach(b=>b.disabled=true);try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Error');await update();}catch(e){el('message').className='bad';el('message').textContent=e.message;}finally{document.querySelectorAll('button').forEach(b=>b.disabled=false)}}
 function startSystem(){command({action:'start',voltage:Number(el('voltage').value),current:Number(el('currentSet').value),heater_power:Number(el('heaterPowerSet').value)})}
+function startPfc(){command({action:'start_pfc',voltage:Number(el('voltage').value),current:Number(el('currentSet').value)})}
+function startHeater(){command({action:'start_heater',heater_power:Number(el('heaterPowerSet').value)})}
 function setPower(){command({action:'power',heater_power:Number(el('newPower').value)})}
 async function update(){try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();const s=d.system,p=d.pfc,h=d.heater;el('message').className=s.message_is_error?'bad':'ok';el('message').textContent=s.mode.toUpperCase()+': '+s.message+(s.transition_remaining_s?' ('+s.transition_remaining_s+' s)':'');show('pfcOrder',p.requested_on?'START':'STOP');show('pfcSet',p.voltage_v.toFixed(1)+' V / '+p.current_a.toFixed(2)+' A');show('pfcCan',p.communication_ok?'Correcto':'Falla');show('pfcFrames',p.frames_sent);show('pfcRecoveries',p.recoveries);show('heaterOnline',h.online?'En linea':'Sin respuesta');show('heaterSwitch',h.switch===1?'Encendido':'Apagado');show('heaterAlarm',h.alarm_text);show('heaterPower',h.power_raw==null?'-':h.power_raw+'/230 ('+h.power_percent+'%)');show('heaterCurrent',h.current_raw);show('heaterFrequency',h.frequency_raw);show('heaterTemperature',h.temperature_raw);}catch(e){el('message').className='bad';el('message').textContent='No se pudo consultar el PLC';}}
 update();setInterval(update,1000);
@@ -411,9 +519,10 @@ def build_app(controller: CombinedController) -> Flask:
     @app.get("/health")
     def health() -> tuple[Response, int]:
         payload = controller.status_payload()
+        heater_required = payload["system"]["mode"] in {"starting", "running"}
         healthy = (
             payload["pfc"]["communication_ok"]
-            and payload["heater"]["online"]
+            and (not heater_required or payload["heater"]["online"])
             and payload["system"]["mode"] != "fault"
         )
         return jsonify({"ok": healthy, **payload}), 200 if healthy else 503
@@ -431,6 +540,20 @@ def build_app(controller: CombinedController) -> Flask:
                     heater_power = int(heater_power)
                 controller.start_system(voltage, current, heater_power)
                 message = "Secuencia de arranque iniciada"
+            elif action == "start_pfc":
+                voltage = float(data.get("voltage"))
+                current = float(data.get("current"))
+                controller.start_pfc(voltage, current)
+                message = "PFC encendido; calentador permanece apagado"
+            elif action == "start_heater":
+                heater_power = data.get("heater_power")
+                if isinstance(heater_power, float) and heater_power.is_integer():
+                    heater_power = int(heater_power)
+                controller.start_heater(heater_power)
+                message = "Secuencia de encendido del calentador iniciada"
+            elif action == "stop_heater":
+                controller.stop_heater()
+                message = "Calentador apagado; PFC permanece encendido"
             elif action == "stop":
                 controller.stop_system()
                 message = "Sistema apagado"
