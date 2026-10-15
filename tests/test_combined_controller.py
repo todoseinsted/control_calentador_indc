@@ -175,6 +175,12 @@ class CombinedControllerTests(unittest.TestCase):
             self.controller.status_payload()["system"]["mode"], "pfc_on"
         )
 
+    def test_stop_heater_is_idempotent_when_pfc_is_off(self) -> None:
+        self.controller.stop_heater()
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.pfc.current.requested_on)
+        self.assertFalse(self.heater.requested_on)
+
     def test_pfc_only_tolerates_unavailable_heater(self) -> None:
         self.heater.current.online = False
         self.heater.current.error = "sin respuesta"
@@ -213,6 +219,13 @@ class CombinedControllerTests(unittest.TestCase):
         self.controller.stop_system()
         self.assertEqual(self.events, ["heater.off", "pfc.stop"])
         self.assertEqual(self.controller.status_payload()["system"]["mode"], "off")
+
+    def test_stop_is_idempotent_when_system_is_already_off(self) -> None:
+        self.controller.stop_system()
+        self.assertEqual(self.events, ["pfc.stop"])
+        payload = self.controller.status_payload()
+        self.assertEqual(payload["system"]["mode"], "off")
+        self.assertFalse(payload["system"]["message_is_error"])
 
     def test_alarm_stops_both_devices(self) -> None:
         self.start_running()

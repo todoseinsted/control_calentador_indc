@@ -42,6 +42,10 @@ El PFC y el calentador se pueden manejar por separado:
 - **Apagar calentador** envia `OFF` pero conserva el PFC encendido.
 - **APAGAR TODO** envia primero `OFF` al calentador y despues `STOP` al PFC.
 
+Los dos botones de apagado permanecen habilitados mientras se procesan otras
+ordenes. Si una alarma ya ejecuto la parada automatica, volver a pulsarlos es
+seguro y no genera un error por estar el equipo apagado.
+
 Al pulsar **Encender sistema**:
 
 1. Se reinicia el MCP2515 y se envia `START` al PFC.

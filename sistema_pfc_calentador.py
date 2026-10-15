@@ -225,6 +225,11 @@ class CombinedController:
     def stop_heater(self) -> None:
         """Apaga el calentador y conserva el PFC encendido."""
         with self._commands, self._lock:
+            pfc_status = self.pfc.status()
+            if not pfc_status.requested_on:
+                # Una alarma puede haber ejecutado ya la parada conjunta antes
+                # de que llegue el clic del usuario. La orden OFF es idempotente.
+                return
             if self._state.mode == "pfc_on":
                 self._set_message("PFC encendido; calentador ya estaba apagado")
                 return
@@ -257,10 +262,16 @@ class CombinedController:
     def _safe_stop_locked(self, reason: str, fault: bool) -> None:
         self._state.mode = "stopping"
         errors: list[str] = []
-        try:
-            self.heater.turn_off()
-        except Exception as exc:
-            errors.append(f"OFF calentador: {exc}")
+        pfc_was_requested = self.pfc.status().requested_on
+        should_command_heater_off = (
+            pfc_was_requested
+            and (self.heater.requested_on or self._heater_status.online)
+        )
+        if should_command_heater_off:
+            try:
+                self.heater.turn_off()
+            except Exception as exc:
+                errors.append(f"OFF calentador: {exc}")
         try:
             self.pfc.stop()
         except Exception as exc:
@@ -463,8 +474,8 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 <button class="start" onclick="startPfc()">Encender solo PFC</button>
 <button class="start" onclick="startHeater()">Encender calentador</button>
 <button class="start" onclick="startSystem()">Encender ambos</button>
-<button class="secondary" onclick="command({action:'stop_heater'})">Apagar calentador</button>
-<button class="stop" onclick="command({action:'stop'})">APAGAR TODO</button>
+<button class="secondary safety" onclick="command({action:'stop_heater'})">Apagar calentador</button>
+<button class="stop safety" onclick="command({action:'stop'})">APAGAR TODO</button>
 </div><p class="note">Puede mantener el PFC encendido con el calentador apagado. Para encender el calentador por separado, primero encienda el PFC. APAGAR TODO envia OFF al calentador antes de detener el PFC. 0-230 es una escala de mando, no son watts.</p></div>
 <div class="card"><h2>PFC</h2><div class="grid">
 <div class="item"><div class="label">Orden</div><div id="pfcOrder" class="value">-</div></div>
@@ -485,7 +496,7 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 </div><div class="fields" style="margin-top:12px"><label>Nuevo nivel<input id="newPower" type="number" min="0" max="230" step="1" value="10"></label><button class="secondary" onclick="setPower()">Cambiar potencia</button></div></div>
 </main><script>
 const el=id=>document.getElementById(id); const show=(id,v)=>el(id).textContent=(v??'-');
-async function command(body){document.querySelectorAll('button').forEach(b=>b.disabled=true);try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Error');await update();}catch(e){el('message').className='bad';el('message').textContent=e.message;}finally{document.querySelectorAll('button').forEach(b=>b.disabled=false)}}
+async function command(body){const safety=body.action==='stop'||body.action==='stop_heater';const regular=()=>document.querySelectorAll('button:not(.safety)');if(!safety)regular().forEach(b=>b.disabled=true);else{el('message').className='ok';el('message').textContent='Enviando orden de apagado...';}try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Error');}catch(e){el('message').className='bad';el('message').textContent=e.message;}finally{if(!safety)regular().forEach(b=>b.disabled=false);update();}}
 function startSystem(){command({action:'start',voltage:Number(el('voltage').value),current:Number(el('currentSet').value),heater_power:Number(el('heaterPowerSet').value)})}
 function startPfc(){command({action:'start_pfc',voltage:Number(el('voltage').value),current:Number(el('currentSet').value)})}
 function startHeater(){command({action:'start_heater',heater_power:Number(el('heaterPowerSet').value)})}
