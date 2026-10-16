@@ -217,6 +217,12 @@ La pagina permite:
   alarmas.
 - Forzar una recuperacion CAN del PFC.
 
+Al pulsar **Apagar calentador**, el programa detiene primero el keepalive
+Modbus y reintenta la orden OFF sin apagar el PFC si hay ruido o una perdida
+momentanea de respuesta. La pagina muestra una advertencia hasta poder confirmar
+el apagado. Una alarma real o un calentador que siga informando marcha despues
+del tiempo de seguridad mantienen la parada conjunta de ambos equipos.
+
 La pagina no tiene autenticacion. El puerto 8080 debe quedar restringido a una
 red local confiable y nunca exponerse directamente a Internet.
 

@@ -25,6 +25,8 @@ DEFAULT_HTTP_PORT = 8080
 DEFAULT_STABILIZATION_SECONDS = 2.0
 HEATER_READY_TIMEOUT_SECONDS = 10.0
 HEATER_POLL_SECONDS = 1.0
+HEATER_OFF_ATTEMPTS = 3
+HEATER_OFF_WATCHDOG_SECONDS = 6.0
 SUPERVISOR_PERIOD_SECONDS = 0.1
 
 ALARM_TEXT = {
@@ -94,6 +96,7 @@ class CombinedController:
         self._last_heater_poll = 0.0
         self._start_deadline = 0.0
         self._heater_ready_deadline = 0.0
+        self._heater_stop_deadline = 0.0
         self._heater_off_confirmed = False
         self._closed = False
 
@@ -246,18 +249,33 @@ class CombinedController:
                 self._set_message("PFC encendido; arranque del calentador cancelado")
                 return
 
-            try:
-                self.heater.turn_off()
-            except Exception as exc:
-                self._safe_stop_locked(
-                    f"No se pudo confirmar OFF del calentador: {exc}", fault=True
-                )
-                raise SystemControlError(str(exc)) from exc
             self._state.mode = "pfc_on"
-            self._heater_off_confirmed = True
             self._start_deadline = 0.0
             self._heater_ready_deadline = 0.0
-            self._set_message("PFC encendido; calentador apagado")
+            self._heater_stop_deadline = (
+                time.monotonic() + HEATER_OFF_WATCHDOG_SECONDS
+            )
+            sent, error = self._try_heater_off_locked()
+            self._heater_off_confirmed = sent
+            if sent:
+                self._set_message("PFC encendido; orden OFF enviada al calentador")
+            else:
+                self._set_message(
+                    "PFC encendido; OFF del calentador sin confirmar, "
+                    "reintentando sin keepalive: " + error,
+                    True,
+                )
+
+    def _try_heater_off_locked(self) -> tuple[bool, str]:
+        """Envia OFF varias veces sin convertir ruido UART en STOP del PFC."""
+        last_error = "sin respuesta"
+        for _attempt in range(HEATER_OFF_ATTEMPTS):
+            try:
+                self.heater.turn_off()
+                return True, ""
+            except Exception as exc:
+                last_error = str(exc)
+        return False, last_error
 
     def _safe_stop_locked(self, reason: str, fault: bool) -> None:
         self._state.mode = "stopping"
@@ -281,6 +299,7 @@ class CombinedController:
         self._state.pfc_current_a = 0.0
         self._start_deadline = 0.0
         self._heater_ready_deadline = 0.0
+        self._heater_stop_deadline = 0.0
         self._heater_off_confirmed = False
         self._state.mode = "fault" if fault or errors else "off"
         message = reason
@@ -335,9 +354,11 @@ class CombinedController:
                 self.heater.keep_alive_if_due()
 
                 now = time.monotonic()
+                heater_polled = False
                 if now - self._last_heater_poll >= HEATER_POLL_SECONDS:
                     self._heater_status = self.heater.read_status()
                     self._last_heater_poll = now
+                    heater_polled = True
 
                 if self._state.mode == "running":
                     if not self._heater_status.online:
@@ -351,21 +372,74 @@ class CombinedController:
                             + self._alarm_description(self._heater_status.alarm)
                         )
 
-                if self._state.mode == "pfc_on" and self._heater_status.online:
-                    if (
-                        not self._heater_off_confirmed
-                        or self._heater_status.switch == 1
-                    ):
-                        self.heater.turn_off()
+                if self._state.mode == "pfc_on" and heater_polled:
+                    if not self._heater_status.online:
+                        if self._heater_stop_deadline:
+                            self._set_message(
+                                "PFC encendido; calentador sin comunicacion, "
+                                "OFF enviado y keepalive detenido",
+                                True,
+                            )
+                        self._heater_off_confirmed = False
+                    elif self._heater_status.switch == 0:
+                        sent = True
+                        error = ""
+                        if not self._heater_off_confirmed:
+                            sent, error = self._try_heater_off_locked()
+                        self._heater_off_confirmed = True
+                        self._heater_stop_deadline = 0.0
+                        if not sent:
+                            self._set_message(
+                                "PFC encendido; calentador informa apagado, "
+                                "pero no respondio al refuerzo OFF: " + error,
+                                True,
+                            )
+                        elif self._state.message_is_error:
+                            self._set_message(
+                                "PFC encendido; calentador apagado confirmado"
+                            )
+                    else:
+                        if self._heater_status.alarm not in {None, 0}:
+                            raise SystemControlError(
+                                "alarma con el calentador aun encendido: "
+                                + self._alarm_description(
+                                    self._heater_status.alarm
+                                )
+                            )
+                        if not self._heater_stop_deadline:
+                            self._heater_stop_deadline = (
+                                now + HEATER_OFF_WATCHDOG_SECONDS
+                            )
+                        sent, error = self._try_heater_off_locked()
                         self._heater_status = self.heater.read_status()
                         if (
-                            not self._heater_status.online
-                            or self._heater_status.switch != 0
+                            self._heater_status.online
+                            and self._heater_status.switch == 0
+                        ):
+                            self._heater_off_confirmed = True
+                            self._heater_stop_deadline = 0.0
+                            self._set_message(
+                                "PFC encendido; calentador apagado confirmado"
+                            )
+                        elif (
+                            self._heater_status.online
+                            and self._heater_status.switch == 1
+                            and now >= self._heater_stop_deadline
                         ):
                             raise SystemControlError(
-                                "no se pudo confirmar el calentador apagado"
+                                "el calentador siguio encendido despues de OFF"
                             )
-                        self._heater_off_confirmed = True
+                        else:
+                            self._heater_off_confirmed = False
+                            detail = (
+                                "orden enviada, esperando confirmacion"
+                                if sent
+                                else "sin respuesta: " + error
+                            )
+                            self._set_message(
+                                "PFC encendido; apagado del calentador " + detail,
+                                True,
+                            )
 
                 if self._state.mode == "starting" and now >= self._start_deadline:
                     pfc_status = self.pfc.status()

@@ -69,6 +69,7 @@ class FakeHeater:
         self.events = events
         self.current = HeaterStatus(online=True, switch=0, alarm=0, power_raw=0)
         self.requested_on = False
+        self.turn_off_failures = 0
 
     def turn_on(self) -> None:
         self.events.append("heater.on")
@@ -79,8 +80,11 @@ class FakeHeater:
     def turn_off(self) -> None:
         self.events.append("heater.off")
         self.requested_on = False
-        self.current.switch = 0
         self.current.requested_on = False
+        if self.turn_off_failures:
+            self.turn_off_failures -= 1
+            raise TimeoutError("ruido UART")
+        self.current.switch = 0
 
     def set_power(self, power: int) -> None:
         self.events.append(f"heater.power:{power}")
@@ -174,6 +178,35 @@ class CombinedControllerTests(unittest.TestCase):
         self.assertEqual(
             self.controller.status_payload()["system"]["mode"], "pfc_on"
         )
+
+    def test_stop_heater_uart_noise_does_not_stop_pfc(self) -> None:
+        self.start_running()
+        self.events.clear()
+        self.heater.turn_off_failures = 6
+        self.controller.stop_heater()
+        self.controller._last_heater_poll = 0.0
+        self.controller.service()
+
+        payload = self.controller.status_payload()
+        self.assertEqual(self.events, ["heater.off"] * 6)
+        self.assertTrue(self.pfc.current.requested_on)
+        self.assertFalse(self.heater.requested_on)
+        self.assertEqual(payload["system"]["mode"], "pfc_on")
+        self.assertTrue(payload["system"]["message_is_error"])
+        self.assertIn("PFC encendido", payload["system"]["message"])
+
+    def test_stop_heater_retries_and_recovers_without_stopping_pfc(self) -> None:
+        self.start_running()
+        self.events.clear()
+        self.heater.turn_off_failures = 2
+        self.controller.stop_heater()
+
+        payload = self.controller.status_payload()
+        self.assertEqual(self.events, ["heater.off"] * 3)
+        self.assertTrue(self.pfc.current.requested_on)
+        self.assertFalse(self.heater.requested_on)
+        self.assertEqual(payload["system"]["mode"], "pfc_on")
+        self.assertFalse(payload["system"]["message_is_error"])
 
     def test_stop_heater_is_idempotent_when_pfc_is_off(self) -> None:
         self.controller.stop_heater()
