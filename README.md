@@ -168,6 +168,21 @@ cd /home/nferraro/Documents/pfc_calentador_plc
 python3 -m pip install -r requirements.txt
 ```
 
+En Raspberry Pi OS reciente, las dependencias tambien pueden instalarse para
+el usuario, sin entorno virtual y sin modificar los paquetes administrados por
+Debian. Este es el mismo esquema utilizado en el PLC `.156`:
+
+```bash
+python3 -m pip install --user --break-system-packages minimalmodbus==2.1.1
+```
+
+Si Flask, pyserial o spidev tampoco estuvieran instalados, instale el
+`requirements.txt` completo con las mismas opciones:
+
+```bash
+python3 -m pip install --user --break-system-packages -r requirements.txt
+```
+
 El usuario debe pertenecer a los grupos `spi` y `dialout`, y deben existir:
 
 ```text
@@ -196,6 +211,14 @@ arrancar y estabilizar el PFC.
 
 ```bash
 python3 sistema_pfc_calentador.py
+```
+
+Tambien se incluye `iniciar_control.sh`, pensado para accesos directos del
+escritorio. Inicia el mismo programa con el Python del usuario y conserva la
+parada segura al cerrar la terminal con `Ctrl+C`:
+
+```bash
+./iniciar_control.sh
 ```
 
 Abrir desde un equipo de la misma red:
