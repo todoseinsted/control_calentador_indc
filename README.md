@@ -220,16 +220,18 @@ La pagina permite:
 La pagina no tiene autenticacion. El puerto 8080 debe quedar restringido a una
 red local confiable y nunca exponerse directamente a Internet.
 
-## Ejecucion permanente con systemd
+## Ejecucion manual supervisada con systemd
 
 No se recomienda dejar la interfaz ejecutandose con `nohup`: el proceso puede
 terminar cuando se limpia la sesion del usuario. En el PLC `RaspPLC1` se incluye
 la unidad `systemd/pfc-calentador.service`, que:
 
-- inicia el controlador durante el arranque del PLC;
 - lo reinicia si el proceso termina inesperadamente;
 - ejecuta la parada segura cuando se detiene el servicio;
 - conserva los bloqueos compartidos de SPI y UART.
+
+La unidad se instala deshabilitada: no inicia el controlador cuando arranca el
+PLC. El usuario decide cuando iniciar y detener el programa.
 
 Instalacion en el PLC `RaspPLC1`:
 
@@ -237,7 +239,14 @@ Instalacion en el PLC `RaspPLC1`:
 sudo install -m 0644 systemd/pfc-calentador.service \
   /etc/systemd/system/pfc-calentador.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now pfc-calentador.service
+sudo systemctl disable pfc-calentador.service
+```
+
+Inicio y parada manual:
+
+```bash
+sudo systemctl start pfc-calentador.service
+sudo systemctl stop pfc-calentador.service
 ```
 
 Estado y registro:
@@ -249,8 +258,8 @@ journalctl -u pfc-calentador.service -f
 
 La unidad contiene el usuario y la ruta del PLC `.156`. En otro PLC hay que
 adaptar `User`, `Group`, `WorkingDirectory`, `ExecStart` y `--log-file`. Nunca
-debe habilitarse mientras otro programa este usando `/dev/spidev0.1` o
-`/dev/serial0`.
+debe iniciarse mientras otro programa este usando `/dev/spidev0.1` o
+`/dev/serial0`. No use `systemctl enable` si desea conservar el arranque manual.
 
 ## Control por terminal
 

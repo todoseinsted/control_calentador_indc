@@ -28,7 +28,7 @@ from pfc_controller import (
     build_control_payload,
     health_has_tx_error,
 )
-from sistema_pfc_calentador import CombinedController, power_level_percent
+from sistema_pfc_calentador import PAGE, CombinedController, power_level_percent
 
 
 class FakePFC:
@@ -301,6 +301,16 @@ class CombinedControllerTests(unittest.TestCase):
         self.assertEqual(status.consecutive_errors, 0)
         self.assertTrue(status.communication_ok)
         self.assertGreaterEqual(status.recoveries, 2)
+
+    def test_web_controls_do_not_use_reserved_button_command_name(self) -> None:
+        self.assertNotIn('onclick="command(', PAGE)
+        self.assertIn("async function sendControlCommand(body)", PAGE)
+        self.assertIn(
+            'onclick="sendControlCommand({action:\'stop_heater\'})"', PAGE
+        )
+        self.assertIn(
+            'onclick="sendControlCommand({action:\'stop\'})"', PAGE
+        )
 
 
 if __name__ == "__main__":

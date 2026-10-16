@@ -474,8 +474,8 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 <button class="start" onclick="startPfc()">Encender solo PFC</button>
 <button class="start" onclick="startHeater()">Encender calentador</button>
 <button class="start" onclick="startSystem()">Encender ambos</button>
-<button class="secondary safety" onclick="command({action:'stop_heater'})">Apagar calentador</button>
-<button class="stop safety" onclick="command({action:'stop'})">APAGAR TODO</button>
+<button class="secondary safety" onclick="sendControlCommand({action:'stop_heater'})">Apagar calentador</button>
+<button class="stop safety" onclick="sendControlCommand({action:'stop'})">APAGAR TODO</button>
 </div><p class="note">Puede mantener el PFC encendido con el calentador apagado. Para encender el calentador por separado, primero encienda el PFC. APAGAR TODO envia OFF al calentador antes de detener el PFC. 0-230 es una escala de mando, no son watts.</p></div>
 <div class="card"><h2>PFC</h2><div class="grid">
 <div class="item"><div class="label">Orden</div><div id="pfcOrder" class="value">-</div></div>
@@ -483,7 +483,7 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 <div class="item"><div class="label">CAN TX</div><div id="pfcCan" class="value">-</div></div>
 <div class="item"><div class="label">Tramas</div><div id="pfcFrames" class="value">-</div></div>
 <div class="item"><div class="label">Recuperaciones</div><div id="pfcRecoveries" class="value">-</div></div>
-<div class="item"><button class="secondary" onclick="command({action:'recover_pfc'})">Recuperar CAN</button></div>
+<div class="item"><button class="secondary" onclick="sendControlCommand({action:'recover_pfc'})">Recuperar CAN</button></div>
 </div></div>
 <div class="card"><h2>Calentador</h2><div class="grid">
 <div class="item"><div class="label">Comunicacion</div><div id="heaterOnline" class="value">-</div></div>
@@ -496,11 +496,11 @@ button{padding:11px 17px;border:0;border-radius:9px;font-weight:700;cursor:point
 </div><div class="fields" style="margin-top:12px"><label>Nuevo nivel<input id="newPower" type="number" min="0" max="230" step="1" value="10"></label><button class="secondary" onclick="setPower()">Cambiar potencia</button></div></div>
 </main><script>
 const el=id=>document.getElementById(id); const show=(id,v)=>el(id).textContent=(v??'-');
-async function command(body){const safety=body.action==='stop'||body.action==='stop_heater';const regular=()=>document.querySelectorAll('button:not(.safety)');if(!safety)regular().forEach(b=>b.disabled=true);else{el('message').className='ok';el('message').textContent='Enviando orden de apagado...';}try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Error');}catch(e){el('message').className='bad';el('message').textContent=e.message;}finally{if(!safety)regular().forEach(b=>b.disabled=false);update();}}
-function startSystem(){command({action:'start',voltage:Number(el('voltage').value),current:Number(el('currentSet').value),heater_power:Number(el('heaterPowerSet').value)})}
-function startPfc(){command({action:'start_pfc',voltage:Number(el('voltage').value),current:Number(el('currentSet').value)})}
-function startHeater(){command({action:'start_heater',heater_power:Number(el('heaterPowerSet').value)})}
-function setPower(){command({action:'power',heater_power:Number(el('newPower').value)})}
+async function sendControlCommand(body){const safety=body.action==='stop'||body.action==='stop_heater';const regular=()=>document.querySelectorAll('button:not(.safety)');if(!safety)regular().forEach(b=>b.disabled=true);else{el('message').className='ok';el('message').textContent='Enviando orden de apagado...';}try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Error');}catch(e){el('message').className='bad';el('message').textContent=e.message;}finally{if(!safety)regular().forEach(b=>b.disabled=false);update();}}
+function startSystem(){sendControlCommand({action:'start',voltage:Number(el('voltage').value),current:Number(el('currentSet').value),heater_power:Number(el('heaterPowerSet').value)})}
+function startPfc(){sendControlCommand({action:'start_pfc',voltage:Number(el('voltage').value),current:Number(el('currentSet').value)})}
+function startHeater(){sendControlCommand({action:'start_heater',heater_power:Number(el('heaterPowerSet').value)})}
+function setPower(){sendControlCommand({action:'power',heater_power:Number(el('newPower').value)})}
 async function update(){try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();const s=d.system,p=d.pfc,h=d.heater;el('message').className=s.message_is_error?'bad':'ok';el('message').textContent=s.mode.toUpperCase()+': '+s.message+(s.transition_remaining_s?' ('+s.transition_remaining_s+' s)':'');show('pfcOrder',p.requested_on?'START':'STOP');show('pfcSet',p.voltage_v.toFixed(1)+' V / '+p.current_a.toFixed(2)+' A');show('pfcCan',p.communication_ok?'Correcto':'Falla');show('pfcFrames',p.frames_sent);show('pfcRecoveries',p.recoveries);show('heaterOnline',h.online?'En linea':'Sin respuesta');show('heaterSwitch',h.switch===1?'Encendido':'Apagado');show('heaterAlarm',h.alarm_text);show('heaterPower',h.power_raw==null?'-':h.power_raw+'/230 ('+h.power_percent+'%)');show('heaterCurrent',h.current_raw);show('heaterFrequency',h.frequency_raw);show('heaterTemperature',h.temperature_raw);}catch(e){el('message').className='bad';el('message').textContent='No se pudo consultar el PLC';}}
 update();setInterval(update,1000);
 </script></body></html>"""
