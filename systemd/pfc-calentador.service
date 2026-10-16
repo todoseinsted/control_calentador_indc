@@ -1,0 +1,20 @@
+[Unit]
+Description=Control unificado PFC y calentador
+After=network.target
+
+[Service]
+Type=simple
+User=RaspPLC1
+Group=RaspPLC1
+SupplementaryGroups=spi dialout
+WorkingDirectory=/home/RaspPLC1/Ensayos/pfc_calentador_plc
+ExecStart=/usr/bin/python3 /home/RaspPLC1/Ensayos/pfc_calentador_plc/sistema_pfc_calentador.py --listen 0.0.0.0 --port 8080 --log-file /home/RaspPLC1/Ensayos/pfc_calentador_plc/controller-runtime.log
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGINT
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
